@@ -76,7 +76,6 @@ def train_bpe(
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
             # Run pre-tokenization on your chunk and store the counts for each pre-token
-            # print(chunk)
             parts = re.split("|".join(map(re.escape, special_tokens)), chunk)
 
             for part in parts:
@@ -86,20 +85,12 @@ def train_bpe(
                         continue
                     matchBytes = str_to_tuple_bytes(str)
                     count[matchBytes] += 1
-        end_time = time.time()
         for token in special_tokens:
             vocab[len(vocab)] = token.encode("utf-8")
         for i in range(256):
             vocab[i + len(special_tokens)] = bytes([i])
-        # 优化后只更新test
-        xxx = 0
         while len(vocab) < vocab_size:
-            xxx += 1
-            # print(len(vocab))
-            # print(vocab_size)
             test : dict[tuple[bytes, bytes], int] = defaultdict(int)
-            # if xxx == 2:
-            #     print(match)
             for match in count:
                 for idx in range(len(match) - 1):
                     test[(match[idx], match[idx + 1])] += count[match]
@@ -107,21 +98,6 @@ def train_bpe(
             # best_key = max(sorted(test), key=lambda k: test[k])
             best_key = max(test.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
-            #     print((b'', b'd') < (b' a', b'nd'))
-            #     print(best_key)
-            #     print(test[best_key])
-            #     print(test[(b' ', b'd')])
-            #     print(test[(b' a', b'nd')])
-            # print(best_key)
-            # print(test[best_key])
-            # print(test[(b' ', b'a')])
-            # if xxx == 2:
-            #     print(test)
-            #     print(best_key)
-            #     raise ValueError("xxx")
-            # print(best_key)
-            # 记录, 并且合并count
-            # print(count)
             for match in list(count.keys()):
                 change = False
                 result = []
@@ -140,11 +116,6 @@ def train_bpe(
                             result.append(match[idx])
                             idx += 1
                     count[tuple(result)] += count.pop(match)
-                    # print("change ....")
-                    # print(result)
-                    # print(match)
-                    # print(count[tuple(result)])
-                    # raise ValueError("xxx")
             merges.append(best_key)
             vocab[len(vocab)] = (best_key[0] + best_key[1])
     return (vocab, merges)

@@ -199,7 +199,12 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    x = module.MultiHeadSelfAttentionWithRope(d_model, num_heads, max_seq_len, theta)
+    x.Wo.weight.data = o_proj_weight
+    x.Wq.weight.data = q_proj_weight
+    x.Wk.weight.data = k_proj_weight
+    x.Wv.weight.data = v_proj_weight
+    return x.forward(in_features, token_positions)
 
 
 def run_rope(
@@ -295,7 +300,18 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    block = module.TransformerBlock(d_model, num_heads, d_ff, max_seq_len, theta)
+    block.attention.Wo.weight.data = weights["attn.output_proj.weight"]
+    block.attention.Wq.weight.data = weights["attn.q_proj.weight"]
+    block.attention.Wk.weight.data = weights["attn.k_proj.weight"]
+    block.attention.Wv.weight.data = weights["attn.v_proj.weight"]
+    block.rmsnorm1.gains.data = weights["ln1.weight"]
+    block.rmsnorm2.gains.data = weights["ln2.weight"]
+    block.swiglu.w2.weight.data = weights["ffn.w2.weight"]
+    block.swiglu.glu.W1.weight.data = weights["ffn.w1.weight"]
+    block.swiglu.glu.W2.weight.data = weights["ffn.w3.weight"]
+
+    return block(in_features)
 
 
 def run_transformer_lm(
@@ -377,7 +393,32 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    embedding = module.Embedding(vocab_size, d_model)
+    # blocks = [module.TransformerBlock(d_model, num_heads, d_ff, context_length, rope_theta)] * num_layers
+    blocks = [module.TransformerBlock(d_model, num_heads, d_ff, context_length, rope_theta) for _ in range(num_layers)]
+    norm = module.RMSNorm(d_model, 1e-5)
+    linear = module.Linear(d_model, vocab_size)
+    # softmax = module.Softmax()
+
+    embedding.embeddings.data = weights["token_embeddings.weight"]
+    for i in range(len(blocks)):
+        blocks[i].attention.Wo.weight.data = weights[f"layers.{i}.attn.output_proj.weight"]
+        blocks[i].attention.Wq.weight.data = weights[f"layers.{i}.attn.q_proj.weight"]
+        blocks[i].attention.Wk.weight.data = weights[f"layers.{i}.attn.k_proj.weight"]
+        blocks[i].attention.Wv.weight.data = weights[f"layers.{i}.attn.v_proj.weight"]
+        blocks[i].rmsnorm1.gains.data = weights[f"layers.{i}.ln1.weight"]
+        blocks[i].rmsnorm2.gains.data = weights[f"layers.{i}.ln2.weight"]
+        blocks[i].swiglu.w2.weight.data = weights[f"layers.{i}.ffn.w2.weight"]
+        blocks[i].swiglu.glu.W1.weight.data = weights[f"layers.{i}.ffn.w1.weight"]
+        blocks[i].swiglu.glu.W2.weight.data = weights[f"layers.{i}.ffn.w3.weight"]
+
+    norm.gains.data = weights["ln_final.weight"]
+    linear.weight.data = weights["lm_head.weight"]
+
+    i = embedding(in_indices)
+    for layer in blocks:
+        i = layer(i)
+    return linear(norm(i))
 
 
 def run_rmsnorm(
