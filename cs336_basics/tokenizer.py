@@ -5,6 +5,9 @@ from collections import defaultdict
 import time
 import json
 from typing import Iterator, Iterable
+import multiprocessing as mp
+
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -55,6 +58,27 @@ def find_chunk_boundaries(
 def str_to_tuple_bytes(s: str) -> tuple[bytes]:
     return tuple(bytes([c]) for c in s.encode("utf-8"))
 
+def pre_tokenization(
+    input_path: str,
+    start: int,
+    end: int,
+    special_tokens: list[str] 
+):
+    count : dict[tuple[bytes], int] = defaultdict(int)
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        parts = re.split("|".join(map(re.escape, special_tokens)), chunk)
+
+        for part in parts:
+            for match in re.finditer(PAT, part):
+                str = match.group()
+                if str in special_tokens:
+                    continue
+                matchBytes = str_to_tuple_bytes(str)
+                count[matchBytes] += 1
+    return count
+
 def train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -64,60 +88,60 @@ def train_bpe(
     vocab : dict[int, bytes] = {}
     merges : list[tuple[bytes, bytes]] = []
     count : dict[tuple[bytes], int] = defaultdict(int)
+    num_processes = 4
+    tasks : list[tuple[int, int]]
 
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
     with open(input_path, "rb") as f:
-        num_processes = 4
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+        num_processes = min(num_processes, len(boundaries) - 1)
+        tasks = [(input_path, start, end, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
 
-        # The following is a serial implementation, but you can parallelize this
-        # by sending each start/end pair to a set of processes.
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            # Run pre-tokenization on your chunk and store the counts for each pre-token
-            parts = re.split("|".join(map(re.escape, special_tokens)), chunk)
+    with mp.Pool(num_processes) as pool:
+        results = pool.starmap(pre_tokenization, tasks)
+        for c in results:
+            for key, value in c.items():
+                count[key] += value
 
-            for part in parts:
-                for match in re.finditer(PAT, part):
-                    str = match.group()
-                    if str in special_tokens:
-                        continue
-                    matchBytes = str_to_tuple_bytes(str)
-                    count[matchBytes] += 1
-        for token in special_tokens:
-            vocab[len(vocab)] = token.encode("utf-8")
-        for i in range(256):
-            vocab[i + len(special_tokens)] = bytes([i])
-        while len(vocab) < vocab_size:
-            test : dict[tuple[bytes, bytes], int] = defaultdict(int)
-            for match in count:
+    for token in special_tokens:
+        vocab[len(vocab)] = token.encode("utf-8")
+
+    for i in range(256):
+        vocab[i + len(special_tokens)] = bytes([i])
+
+    test : dict[tuple[bytes, bytes], int] = defaultdict(int)
+    for match in count:
+        for idx in range(len(match) - 1):
+            test[(match[idx], match[idx + 1])] += count[match]
+    while len(vocab) < vocab_size:
+        # merge
+        best_key = max(test.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+        for match in list(count.keys()):
+            change = False
+            result = []
+            for idx in range(len(match) - 1):
+                # 只更新命中的
+                if match[idx] == best_key[0] and match[idx + 1] == best_key[1]:
+                    change = True
+                    break
+            if change:
+                idx = 0
+                while idx < len(match):
+                    if idx < (len(match) - 1) and match[idx] == best_key[0] and match[idx + 1] == best_key[1]:
+                        result.append(match[idx] + match[idx + 1])
+                        idx += 2
+                    else:
+                        result.append(match[idx])
+                        idx += 1
+                # 更新新的match和result
                 for idx in range(len(match) - 1):
-                    test[(match[idx], match[idx + 1])] += count[match]
-            # merge
-            # best_key = max(sorted(test), key=lambda k: test[k])
-            best_key = max(test.items(), key=lambda kv: (kv[1], kv[0]))[0]
-
-            for match in list(count.keys()):
-                change = False
-                result = []
-                for idx in range(len(match) - 1):
-                    # 只更新命中的
-                    if match[idx] == best_key[0] and match[idx + 1] == best_key[1]:
-                        change = True
-                        break
-                if change:
-                    idx = 0
-                    while idx < len(match):
-                        if idx < (len(match) - 1) and match[idx] == best_key[0] and match[idx + 1] == best_key[1]:
-                            result.append(match[idx] + match[idx + 1])
-                            idx += 2
-                        else:
-                            result.append(match[idx])
-                            idx += 1
-                    count[tuple(result)] += count.pop(match)
-            merges.append(best_key)
-            vocab[len(vocab)] = (best_key[0] + best_key[1])
+                    test[(match[idx], match[idx + 1])] -= count[match]
+                for idx in range(len(result) - 1):
+                    test[(result[idx], result[idx + 1])] += count[match]
+                count[tuple(result)] += count.pop(match)
+        merges.append(best_key)
+        vocab[len(vocab)] = (best_key[0] + best_key[1])
     return (vocab, merges)
 
 class Tokenizer:
@@ -146,15 +170,7 @@ class Tokenizer:
             print(data)
             raise ValueError("xxx")
 
-    def encode(
-        self, 
-        text: str
-    ) -> list[int]:
-        token_ids: list[int] = []
-        cache: dict[str, list[int]] = {}
-
-        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-
+    def encode_single(self, text: str, token_ids: list[int], cache: dict[str, list[int]]):
         parts = [text]
         if self.special_tokens:
             parts = re.split("(" + "|".join(map(re.escape, self.special_tokens)) + ")", text)
@@ -198,9 +214,14 @@ class Tokenizer:
                         cache[str] = token_id
 
                 token_ids.extend(cache[str])
-                
-                
 
+    def encode(
+        self, 
+        text: str
+    ) -> list[int]:
+        token_ids: list[int] = []
+        cache: dict[str, list[int]] = {}
+        self.encode_single(text, token_ids, cache)
         return token_ids
 
     def decode(
@@ -217,7 +238,8 @@ class Tokenizer:
         self, 
         iterable: Iterable[str]
     ) -> Iterator[int]:
-        tokens = []
+        token_ids = []
+        cache: dict[str, list[int]] = {}
         for word in iterable:
-            tokens.extend(self.encode(word))
-        return iter(tokens)
+            self.encode_single(word, token_ids, cache)
+        return iter(token_ids)
