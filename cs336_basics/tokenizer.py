@@ -88,7 +88,7 @@ def train_bpe(
     vocab : dict[int, bytes] = {}
     merges : list[tuple[bytes, bytes]] = []
     count : dict[tuple[bytes], int] = defaultdict(int)
-    num_processes = 4
+    num_processes = 8
     tasks : list[tuple[int, int]]
 
 
@@ -158,6 +158,8 @@ class Tokenizer:
         else:
             self.special_tokens = None
         self.vocab_inv = {v: k for k, v in self.vocab.items()}
+        self.merges_dict = {pair: i for i, pair in enumerate(merges)}
+
 
     def from_files(
         cls, 
@@ -170,7 +172,7 @@ class Tokenizer:
             print(data)
             raise ValueError("xxx")
 
-    def encode_single(self, text: str, token_ids: list[int], cache: dict[str, list[int]]):
+    def encode_single(self, text: str, token_ids: list[int]):
         parts = [text]
         if self.special_tokens:
             parts = re.split("(" + "|".join(map(re.escape, self.special_tokens)) + ")", text)
@@ -182,46 +184,26 @@ class Tokenizer:
             for match in re.finditer(PAT, part):
                 str = match.group()
 
-                if str not in cache:
-                    matchBytes = str_to_tuple_bytes(str)
+                tokens = list(str_to_tuple_bytes(str))
 
-                    if matchBytes in self.vocab_inv:
-                        cache[str] = self.vocab_inv[matchBytes]
-                    else:
-                        for merge in self.merges:
-                            idx = 0
-                            result = []
-                            change = False
-                            while idx < len(matchBytes):
-                                if idx < len(matchBytes) - 1 and matchBytes[idx] == merge[0] and matchBytes[idx + 1] == merge[1]:
-                                    change = True
-                                idx += 1
-                            idx = 0
-                            if change:
-                                while idx < len(matchBytes):
-                                    if idx < len(matchBytes) - 1 and matchBytes[idx] == merge[0] and matchBytes[idx + 1] == merge[1]:
-                                        result.append(matchBytes[idx] + matchBytes[idx + 1])
-                                        idx += 2
-                                    else:
-                                        result.append(matchBytes[idx])
-                                        idx += 1
-                                matchBytes = result
+                while True:
+                    pairs = [(tokens[i], tokens[i + 1]) for i in range(len(tokens) - 1)]
+                    valid_pairs = [(p, self.merges_dict[p]) for p in pairs if p in self.merges_dict]
+                    if not valid_pairs:
+                        break
+                    best = min(valid_pairs, key=lambda x: x[1])[0]
+                    i = pairs.index(best)
+                    tokens = tokens[:i] + [tokens[i] + tokens[i+1]] + tokens[i+2:]
 
-                        token_id: list[int] = []
-                        for b in matchBytes:
-                            token_id.append(self.vocab_inv[b])
-                        
-                        cache[str] = token_id
-
-                token_ids.extend(cache[str])
+                token_ids.extend([self.vocab_inv[token] for token in tokens])
+        return token_ids
 
     def encode(
         self, 
         text: str
     ) -> list[int]:
         token_ids: list[int] = []
-        cache: dict[str, list[int]] = {}
-        self.encode_single(text, token_ids, cache)
+        self.encode_single(text, token_ids)
         return token_ids
 
     def decode(
@@ -239,7 +221,6 @@ class Tokenizer:
         iterable: Iterable[str]
     ) -> Iterator[int]:
         token_ids = []
-        cache: dict[str, list[int]] = {}
         for word in iterable:
-            self.encode_single(word, token_ids, cache)
+            self.encode_single(word, token_ids)
         return iter(token_ids)
