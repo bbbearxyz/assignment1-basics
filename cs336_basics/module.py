@@ -1,7 +1,10 @@
 import torch
 import math
 from einops import einsum, rearrange
-
+from typing import Optional, Callable, Iterable
+import numpy.typing as npt
+from typing import IO, Any, BinaryIO
+import os
 
 class Linear(torch.nn.Module):
     def __init__(
@@ -152,7 +155,7 @@ class Attention(torch.nn.Module):
             normal_value = self.Softmax.forward(value, -1)
             return einsum(normal_value, V, "... queries values, ... values d_v -> ... queries d_v")
         normal_value = self.Softmax.forward(value.masked_fill(mask == 0, float("-inf")), -1)
-        return einsum(normal_value, V, "... queries values, ... values d _v -> ... queries d_v")
+        return einsum(normal_value, V, "... queries values, ... values d_v -> ... queries d_v")
 
 class MultiHeadSelfAttention(torch.nn.Module):
     def __init__(
@@ -282,4 +285,108 @@ class TransformerBlock(torch.nn.Module):
 
         # y = x + MultiHeadSelfAttention(SwiGLU(x))
         return first_output + self.swiglu(self.rmsnorm2(first_output))
+
+class CrossEntropyLoss(torch.nn.Module):
+    def __init__(
+        self
+    ):
+        super().__init__()
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor):
+        max_val, _ = torch.max(inputs, dim = -1, keepdim=True)
+        exp = torch.exp(inputs - max_val)
+        sum_val = torch.sum(exp, dim = -1, keepdim=True)
+        prev = -inputs[torch.arange(inputs.shape[0]), targets]
+        return (prev + torch.log(sum_val) + max_val).mean()
+    
+class AdamW(torch.optim.Optimizer):
+    def __init__(self, params, lr = 1e-3, weight_decay = 0.01, betas = (0.9, 0.999), eps = 1e-8):
+        defaults = {"lr": lr, "weight_decay": weight_decay, "betas": betas, "eps": eps}
+        super().__init__(params, defaults)
+
+    def step(self, closure: Optional[Callable] = None):
+        loss = None if closure is None else closure()
+        for group in self.param_groups:
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            betas = group["betas"]
+            eps = group["eps"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                state = self.state[p] # Get state associated with p.
+                m = state.get("m", torch.zeros_like(p.data))
+                v = state.get("v", torch.zeros_like(p.data))
+                t = state.get("t", 1)
+                grad = p.grad.data
+                m = betas[0] * m + (1 - betas[0]) * grad
+                v = betas[1] * v + (1 - betas[1]) * (grad * grad)
+                lrt = lr * (math.sqrt(1 - betas[1] ** t) / (1 - betas[0] ** t))
+
+                p.data -= lrt * m / (torch.sqrt(v) + eps)
+                p.data -= lr * weight_decay * p.data
+
+                state["m"] = m
+                state["v"] = v
+                state["t"] = t + 1
+
+        return loss
+    
+def get_lr_cosine_schedule(
+    it: int,
+    max_learning_rate: float,
+    min_learning_rate: float,
+    warmup_iters: int,
+    cosine_cycle_iters: int) -> float:
+    if it < warmup_iters:
+        return it / warmup_iters * max_learning_rate
+    elif it <= cosine_cycle_iters:
+        return min_learning_rate + 0.5 * (1 + math.cos((it - warmup_iters) / (cosine_cycle_iters - warmup_iters) * math.pi)) * (max_learning_rate - min_learning_rate)
+    else:
+        return min_learning_rate
+
+def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float):
+    grads = [p.grad for p in parameters if p.grad is not None]
+    l2 = torch.norm(torch.stack([torch.norm(g, 2) for g in grads]), 2)
+
+    if l2 > max_l2_norm:
+        for grad in grads:
+            grad.data *= (max_l2_norm / (l2 + 1e-6))
+
+def get_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    inputs = torch.empty([batch_size, context_length], dtype = torch.long, device = device)
+    label = torch.empty([batch_size, context_length], dtype = torch.long, device = device)
+
+    data = torch.tensor(dataset, dtype=torch.long, device = device)
+
+    starts = torch.randint(0, data.shape[0] - context_length, (batch_size,))
+
+    for i in range(len(starts)):
+        inputs[i][:] = data[starts[i] : starts[i] + context_length]
+        label[i][:] = data[starts[i] + 1 : starts[i] + context_length + 1]
+
+    return inputs, label
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: str | os.PathLike | BinaryIO | IO[bytes]
+):
+    checkpoint = {
+        "model" : model.state_dict(),
+        "optimizer" : optimizer.state_dict(),
+        "iter" : iteration
+    }
+    torch.save(checkpoint, out)
+
+def load_checkpoint(
+    src: str | os.PathLike | BinaryIO | IO[bytes],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer
+):
+    checkpoint = torch.load(src)
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    return checkpoint["iter"]
 

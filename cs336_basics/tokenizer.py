@@ -6,7 +6,9 @@ import time
 import json
 from typing import Iterator, Iterable
 import multiprocessing as mp
+import heapq
 
+DEBUG = True
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 def find_chunk_boundaries(
@@ -88,10 +90,11 @@ def train_bpe(
     vocab : dict[int, bytes] = {}
     merges : list[tuple[bytes, bytes]] = []
     count : dict[tuple[bytes], int] = defaultdict(int)
-    num_processes = 8
+    num_processes = 10
     tasks : list[tuple[int, int]]
 
 
+    start_time = time.time()
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
         num_processes = min(num_processes, len(boundaries) - 1)
@@ -110,38 +113,65 @@ def train_bpe(
         vocab[i + len(special_tokens)] = bytes([i])
 
     test : dict[tuple[bytes, bytes], int] = defaultdict(int)
+    # test记录多个token
     for match in count:
         for idx in range(len(match) - 1):
             test[(match[idx], match[idx + 1])] += count[match]
+
+    heap = []
+    for key, value in test.items():
+        heapq.heappush(heap, (-value, key))
+
+    mid_time = time.time()
+    time_find_max = 0
     while len(vocab) < vocab_size:
         # merge
-        best_key = max(test.items(), key=lambda kv: (kv[1], kv[0]))[0]
+        first = time.time()
+
+        # 懒删除
+        while heap:
+            freq, pair = heapq.heappop(heap)
+            freq = -freq
+            if test[pair] == freq:
+                break
+
+        time_find_max += (time.time() - first)
+        new_token = pair[0] + pair[1]
 
         for match in list(count.keys()):
             change = False
             result = []
             for idx in range(len(match) - 1):
                 # 只更新命中的
-                if match[idx] == best_key[0] and match[idx + 1] == best_key[1]:
+                if match[idx] == pair[0] and match[idx + 1] == pair[1]:
                     change = True
                     break
             if change:
                 idx = 0
                 while idx < len(match):
-                    if idx < (len(match) - 1) and match[idx] == best_key[0] and match[idx + 1] == best_key[1]:
-                        result.append(match[idx] + match[idx + 1])
+                    if idx < (len(match) - 1) and match[idx] == pair[0] and match[idx + 1] == pair[1]:
+                        result.append(new_token)
                         idx += 2
                     else:
                         result.append(match[idx])
                         idx += 1
+
                 # 更新新的match和result
+                # 优化: 理论上只需要更新修改后的heap
                 for idx in range(len(match) - 1):
-                    test[(match[idx], match[idx + 1])] -= count[match]
+                    test[new_token] -= count[match]
+                    heapq.heappush(heap, (-test[new_token], new_token))
                 for idx in range(len(result) - 1):
-                    test[(result[idx], result[idx + 1])] += count[match]
+                    test[new_token] += count[match]
+                    heapq.heappush(heap, (-test[new_token], new_token))
                 count[tuple(result)] += count.pop(match)
-        merges.append(best_key)
-        vocab[len(vocab)] = (best_key[0] + best_key[1])
+        merges.append(pair)
+        vocab[len(vocab)] = new_token
+    
+    end_time = time.time()
+    print("pre token cost", mid_time - start_time)
+    print("merge cost", end_time - mid_time)
+    print("find max", time_find_max)
     return (vocab, merges)
 
 class Tokenizer:
