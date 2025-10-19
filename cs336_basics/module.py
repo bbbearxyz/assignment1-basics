@@ -286,6 +286,37 @@ class TransformerBlock(torch.nn.Module):
         # y = x + MultiHeadSelfAttention(SwiGLU(x))
         return first_output + self.swiglu(self.rmsnorm2(first_output))
 
+class TransformerLM(torch.nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        theta: float,
+        num_layers: int,
+        vocab_size: int,
+    ):
+        super().__init__()
+        self.num_layers = num_layers
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+
+        self.embedding = Embedding(vocab_size, d_model)
+        self.blocks = [TransformerBlock(d_model, num_heads, d_ff, max_seq_len, theta) for _ in range(num_layers)]
+        self.norm = RMSNorm(d_model, 1e-5)
+        self.linear = Linear(d_model, vocab_size)
+    
+    def forward(self, in_indices: torch.Tensor):
+        in_features = self.embedding(in_indices)
+        for block in self.blocks:
+            in_features = block(in_features)
+        return self.linear(self.norm(in_features))
+
 class CrossEntropyLoss(torch.nn.Module):
     def __init__(
         self
@@ -354,10 +385,10 @@ def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: flo
             grad.data *= (max_l2_norm / (l2 + 1e-6))
 
 def get_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    inputs = torch.empty([batch_size, context_length], dtype = torch.long, device = device)
-    label = torch.empty([batch_size, context_length], dtype = torch.long, device = device)
+    inputs = torch.empty([batch_size, context_length], dtype = torch.int, device = device)
+    label = torch.empty([batch_size, context_length], dtype = torch.int, device = device)
 
-    data = torch.tensor(dataset, dtype=torch.long, device = device)
+    data = torch.tensor(dataset, dtype=torch.int, device = device)
 
     starts = torch.randint(0, data.shape[0] - context_length, (batch_size,))
 
@@ -366,6 +397,22 @@ def get_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device
         label[i][:] = data[starts[i] + 1 : starts[i] + context_length + 1]
 
     return inputs, label
+
+def get_memmap_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:    
+    data = torch.tensor(dataset, dtype=torch.int, device = device)
+    step_size = (data.shape[0] - context_length - 1 + batch_size) // batch_size
+
+    for i in range(step_size):
+        last_batch_size = (data.shape[0] - context_length - i * batch_size) if i == step_size - 1 else batch_size
+        start_index = i * batch_size
+
+        inputs = torch.empty([last_batch_size, context_length], dtype = torch.int, device = device)
+        label = torch.empty([last_batch_size, context_length], dtype = torch.int, device = device)
+
+        for offset in range(last_batch_size):
+            inputs[offset][:] = data[start_index + offset : start_index + offset + context_length]
+            label[offset][:] = data[start_index + offset + 1 : start_index + offset + context_length + 1]
+        yield inputs, label
 
 def save_checkpoint(
     model: torch.nn.Module,
@@ -389,4 +436,3 @@ def load_checkpoint(
     model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
     return checkpoint["iter"]
-

@@ -393,32 +393,24 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    embedding = module.Embedding(vocab_size, d_model)
-    # blocks = [module.TransformerBlock(d_model, num_heads, d_ff, context_length, rope_theta)] * num_layers
-    blocks = [module.TransformerBlock(d_model, num_heads, d_ff, context_length, rope_theta) for _ in range(num_layers)]
-    norm = module.RMSNorm(d_model, 1e-5)
-    linear = module.Linear(d_model, vocab_size)
-    # softmax = module.Softmax()
+    model = module.TransformerLM(d_model, num_heads, d_ff, context_length, rope_theta, num_layers, vocab_size)
 
-    embedding.embeddings.data = weights["token_embeddings.weight"]
-    for i in range(len(blocks)):
-        blocks[i].attention.Wo.weight.data = weights[f"layers.{i}.attn.output_proj.weight"]
-        blocks[i].attention.Wq.weight.data = weights[f"layers.{i}.attn.q_proj.weight"]
-        blocks[i].attention.Wk.weight.data = weights[f"layers.{i}.attn.k_proj.weight"]
-        blocks[i].attention.Wv.weight.data = weights[f"layers.{i}.attn.v_proj.weight"]
-        blocks[i].rmsnorm1.gains.data = weights[f"layers.{i}.ln1.weight"]
-        blocks[i].rmsnorm2.gains.data = weights[f"layers.{i}.ln2.weight"]
-        blocks[i].swiglu.w2.weight.data = weights[f"layers.{i}.ffn.w2.weight"]
-        blocks[i].swiglu.glu.W1.weight.data = weights[f"layers.{i}.ffn.w1.weight"]
-        blocks[i].swiglu.glu.W2.weight.data = weights[f"layers.{i}.ffn.w3.weight"]
+    model.embedding.embeddings.data = weights["token_embeddings.weight"]
+    for i in range(len(model.blocks)):
+        model.blocks[i].attention.Wo.weight.data = weights[f"layers.{i}.attn.output_proj.weight"]
+        model.blocks[i].attention.Wq.weight.data = weights[f"layers.{i}.attn.q_proj.weight"]
+        model.blocks[i].attention.Wk.weight.data = weights[f"layers.{i}.attn.k_proj.weight"]
+        model.blocks[i].attention.Wv.weight.data = weights[f"layers.{i}.attn.v_proj.weight"]
+        model.blocks[i].rmsnorm1.gains.data = weights[f"layers.{i}.ln1.weight"]
+        model.blocks[i].rmsnorm2.gains.data = weights[f"layers.{i}.ln2.weight"]
+        model.blocks[i].swiglu.w2.weight.data = weights[f"layers.{i}.ffn.w2.weight"]
+        model.blocks[i].swiglu.glu.W1.weight.data = weights[f"layers.{i}.ffn.w1.weight"]
+        model.blocks[i].swiglu.glu.W2.weight.data = weights[f"layers.{i}.ffn.w3.weight"]
 
-    norm.gains.data = weights["ln_final.weight"]
-    linear.weight.data = weights["lm_head.weight"]
+    model.norm.gains.data = weights["ln_final.weight"]
+    model.linear.weight.data = weights["lm_head.weight"]
 
-    i = embedding(in_indices)
-    for layer in blocks:
-        i = layer(i)
-    return linear(norm(i))
+    return model.forward(in_indices)
 
 
 def run_rmsnorm(

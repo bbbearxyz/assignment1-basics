@@ -6,7 +6,9 @@ import time
 import json
 from typing import Iterator, Iterable
 import multiprocessing as mp
-import heapq
+from functools import lru_cache
+import numpy as np
+
 
 DEBUG = True
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -118,9 +120,9 @@ def train_bpe(
         for idx in range(len(match) - 1):
             test[(match[idx], match[idx + 1])] += count[match]
 
-    heap = []
-    for key, value in test.items():
-        heapq.heappush(heap, (-value, key))
+    # heap = []
+    # for key, value in test.items():
+    #     heapq.heappush(heap, (-value, key))
 
     mid_time = time.time()
     time_find_max = 0
@@ -128,12 +130,14 @@ def train_bpe(
         # merge
         first = time.time()
 
+        pair = max(test.items(), key=lambda kv: (kv[1], kv[0]))[0]
         # 懒删除
-        while heap:
-            freq, pair = heapq.heappop(heap)
-            freq = -freq
-            if test[pair] == freq:
-                break
+        # while heap:
+        #     freq, pair = heapq.heappop(heap)
+        #     freq = -freq
+        #     if test[pair] == freq and freq > 0:
+        #         break
+
 
         time_find_max += (time.time() - first)
         new_token = pair[0] + pair[1]
@@ -159,11 +163,12 @@ def train_bpe(
                 # 更新新的match和result
                 # 优化: 理论上只需要更新修改后的heap
                 for idx in range(len(match) - 1):
-                    test[new_token] -= count[match]
-                    heapq.heappush(heap, (-test[new_token], new_token))
+                    test[(match[idx], match[idx + 1])] -= count[match]
+                    # heapq.heappush(heap, (-test[(match[idx], match[idx + 1])], (match[idx], match[idx + 1])))
+
                 for idx in range(len(result) - 1):
-                    test[new_token] += count[match]
-                    heapq.heappush(heap, (-test[new_token], new_token))
+                    test[(result[idx], result[idx + 1])] += count[match]
+                    # heapq.heappush(heap, (-test[(result[idx], result[idx + 1])], (result[idx], result[idx + 1])))
                 count[tuple(result)] += count.pop(match)
         merges.append(pair)
         vocab[len(vocab)] = new_token
@@ -173,6 +178,53 @@ def train_bpe(
     print("merge cost", end_time - mid_time)
     print("find max", time_find_max)
     return (vocab, merges)
+
+@lru_cache
+def gpt2_bytes_to_unicode() -> dict[int, str]:
+    """
+    Returns a mapping between every possible byte (an integer from 0 to 255) to a
+    printable unicode string character representation. This function is taken
+    from the GPT-2 code.
+
+    For example, `chr(0)` is `\x00`, which is an unprintable character:
+
+    >>> chr(0)
+    '\x00'
+    >>> print(chr(0))
+
+    As a result, this function returns a dictionary `d` where `d[0]` returns `Ā`.
+    The bytes that are visually printable keep their original string representation [1].
+    For example, `chr(33)` returns `!`, and so accordingly `d[33]` returns `!`.
+    Note in particular that the space character `chr(32)` becomes `d[32]`, which
+    returns 'Ġ'.
+
+    For unprintable characters, the function shifts takes the integer representing
+    the Unicode code point of that character (returned by the Python `ord`) function
+    and shifts it by 256. For example, `ord(" ")` returns `32`, so the the space character
+    ' ' is shifted to `256 + 32`. Since `chr(256 + 32)` returns `Ġ`, we use that as the
+    string representation of the space.
+
+    This function can simplify the BPE implementation and makes it slightly easier to
+    manually inspect the generated merges after they're serialized to a file.
+    """
+    # These 188 integers can used as-is, since they are not whitespace or control characters.
+    # See https://www.ssec.wisc.edu/~tomw/java/unicode.html.
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    cs = bs[:]
+    # now get the representations of the other 68 integers that do need shifting
+    # each will get mapped chr(256 + n), where n will grow from 0...67 in the loop
+    # Get printable representations of the remaining integers 68 integers.
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            # If this integer isn't in our list of visually-representable
+            # charcters, then map it to the next nice character (offset by 256)
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    characters = [chr(n) for n in cs]
+    d = dict(zip(bs, characters))
+    return d
 
 class Tokenizer:
     def __init__(
@@ -190,17 +242,50 @@ class Tokenizer:
         self.vocab_inv = {v: k for k, v in self.vocab.items()}
         self.merges_dict = {pair: i for i, pair in enumerate(merges)}
 
+        self.byte_encoder = gpt2_bytes_to_unicode()
+        self.byte_decoder = {v: k for k, v in self.byte_encoder.items()}
+ 
+    def write_files(self, vocab_filepath: str, merges_filepath: str):
+        # write vocab and merges
+        with open(vocab_filepath, "w", encoding="utf-8") as f:
+            data = {''.join(self.byte_encoder[token] for token in v): k for k, v in self.vocab.items()}
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
+        with open(merges_filepath, "w", encoding="utf-8") as f:
+            for merge in self.merges:
+                token1 = ''.join(self.byte_encoder[token] for token in merge[0])
+                token2 = ''.join(self.byte_encoder[token] for token in merge[1])
+                f.write(token1 + " " + token2 + "\n")
+    
+    @classmethod
     def from_files(
         cls, 
         vocab_filepath: str, 
         merges_filepath: str, 
         special_tokens: list[str] | None = None
     ):
-        with open(vocab_filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            print(data)
-            raise ValueError("xxx")
+        byte_encoder = gpt2_bytes_to_unicode()
+        byte_decoder = {v: k for k, v in byte_encoder.items()}
+        vocab = {}
+        merges = []
+
+        with open(vocab_filepath, encoding="utf-8") as f:
+            gpt2_reference_vocab = json.load(f)
+            vocab = {
+                gpt2_vocab_index: bytes([byte_decoder[token] for token in gpt2_vocab_item])
+                for gpt2_vocab_item, gpt2_vocab_index in gpt2_reference_vocab.items()
+            }
+
+        with open(merges_filepath, encoding="utf-8") as f:
+            gpt2_reference_merges = [tuple(line.rstrip().split(" ")) for line in f]
+            merges = [
+                (
+                    bytes([byte_decoder[token] for token in merge_token_1]),
+                    bytes([byte_decoder[token] for token in merge_token_2]),
+                )
+                for merge_token_1, merge_token_2 in gpt2_reference_merges
+            ]
+        return Tokenizer(vocab, merges, special_tokens)
 
     def encode_single(self, text: str, token_ids: list[int]):
         parts = [text]
@@ -254,3 +339,16 @@ class Tokenizer:
         for word in iterable:
             self.encode_single(word, token_ids)
         return iter(token_ids)
+
+class DataSetTranslate:
+    def __init__(self, tokenizer: Tokenizer):
+        self.tokenizer = tokenizer
+
+    def call(self, dataset_path: str, output_path: str):
+        token_ids = []
+        with open(dataset_path, "r") as f:
+            for id in self.tokenizer.encode_iterable(f):
+                token_ids.append(id)
+        numpy_array = np.array(token_ids, dtype=np.uint16)
+        with open(output_path, "wb") as f:
+            numpy_array.tofile(f)
