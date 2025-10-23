@@ -452,7 +452,8 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    x = module.SiLU()
+    return x.forward(in_features)
 
 
 def run_get_batch(
@@ -490,8 +491,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    x = module.Softmax(dim)
-    return x.forward(in_features)
+    x = module.Softmax()
+    return x.forward(in_features, dim=dim)
 
 
 def run_cross_entropy(

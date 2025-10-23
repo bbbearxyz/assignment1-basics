@@ -307,7 +307,7 @@ class TransformerLM(torch.nn.Module):
         self.theta = theta
 
         self.embedding = Embedding(vocab_size, d_model)
-        self.blocks = [TransformerBlock(d_model, num_heads, d_ff, max_seq_len, theta) for _ in range(num_layers)]
+        self.blocks = torch.nn.ModuleList([TransformerBlock(d_model, num_heads, d_ff, max_seq_len, theta) for _ in range(num_layers)])
         self.norm = RMSNorm(d_model, 1e-5)
         self.linear = Linear(d_model, vocab_size)
     
@@ -409,6 +409,7 @@ def get_memmap_batch(dataset: npt.NDArray, batch_size: int, context_length: int,
         inputs = torch.empty([last_batch_size, context_length], dtype = torch.int, device = device)
         label = torch.empty([last_batch_size, context_length], dtype = torch.int, device = device)
 
+        print(f"start_index: {start_index}")
         for offset in range(last_batch_size):
             inputs[offset][:] = data[start_index + offset : start_index + offset + context_length]
             label[offset][:] = data[start_index + offset + 1 : start_index + offset + context_length + 1]
